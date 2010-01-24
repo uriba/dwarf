@@ -106,7 +106,7 @@ getNullTerminatedString = liftM (map (chr . fromIntegral)) $ getWhile (/= 0) get
                 n | n .&. 0xf0 == 0xe0 -> getCharUTF83 n
                 n | n .&. 0xf8 == 0xf0 -> getCharUTF84 n
                 _                      -> fail "Invalid first byte in UTF8 string."
-
+ 
 -- Decode a signed little-endian base 128 encoded integer.
 getSLEB128 :: Get Int64
 getSLEB128 =
@@ -144,7 +144,7 @@ getDwarfUnitLength dr@(DwarfEndianReader e w16 w32 w64) = do
      else if size >= 0xffffff00 then
         fail ("Invalid DWARF size " ++ show size)
       else
-        return (dwarfEndianSizeReader False dr, fromIntegral size)
+        return (dwarfEndianSizeReader False dr, fromIntegral $ size)
 
 
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -174,7 +174,7 @@ data DwarfReader = DwarfReader
     , getDwarfTargetAddress :: Get Word64 -- ^ Action for reading a pointer for the target machine.
     }
 instance Show DwarfReader where
-    show dr = "DwarfReader " ++ show (littleEndian dr) ++ " " ++ show (dwarf64 dr) ++ " " ++ show (target64 dr)
+    show dr = "DwarfReader " ++ show (littleEndian dr) ++ " " ++ show (dwarf64 dr) ++ " " ++ show (target64 dr) 
 instance Eq DwarfReader where
     a1 == a2 = (littleEndian a1 == littleEndian a2) && (dwarf64 a1 == dwarf64 a2) && (target64 a1 == target64 a2)
 dwarfReader True  (DwarfEndianSizeReader e w16 w32 w64 d lo sz) = DwarfReader e d True lo 0xffffffffffffffff w16 w32 w64 sz w64
@@ -183,16 +183,16 @@ dwarfReader False (DwarfEndianSizeReader e w16 w32 w64 d lo sz) = DwarfReader e 
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 -- Abbreviation and form parsing
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------
-getForm = getForm_
-getForm_ dr str cu DW_FORM_addr      = pure (DW_ATVAL_UINT . fromIntegral) <*> getDwarfTargetAddress dr
-getForm_ dr str cu DW_FORM_block1    = liftM DW_ATVAL_BLOB (liftM fromIntegral getWord8 >>= getByteString)
-getForm_ dr str cu DW_FORM_block2    = liftM DW_ATVAL_BLOB (liftM fromIntegral (getWord16 dr) >>= getByteString)
-getForm_ dr str cu DW_FORM_block4    = liftM DW_ATVAL_BLOB (liftM fromIntegral (getWord32 dr) >>= getByteString)
-getForm_ dr str cu DW_FORM_block     = liftM DW_ATVAL_BLOB (getULEB128 >>= getByteString)
+getForm dr str cu form = getForm_ dr str cu form
+getForm_ dr str cu DW_FORM_addr      = pure (DW_ATVAL_UINT . fromIntegral) <*> (getDwarfTargetAddress dr)
+getForm_ dr str cu DW_FORM_block1    = liftM fromIntegral getWord8       >>= getByteString >>= return . DW_ATVAL_BLOB
+getForm_ dr str cu DW_FORM_block2    = liftM fromIntegral (getWord16 dr) >>= getByteString >>= return . DW_ATVAL_BLOB
+getForm_ dr str cu DW_FORM_block4    = liftM fromIntegral (getWord32 dr) >>= getByteString >>= return . DW_ATVAL_BLOB
+getForm_ dr str cu DW_FORM_block     = liftM fromIntegral getULEB128     >>= getByteString >>= return . DW_ATVAL_BLOB
 getForm_ dr str cu DW_FORM_data1     = pure (DW_ATVAL_UINT . fromIntegral) <*> getWord8
-getForm_ dr str cu DW_FORM_data2     = pure (DW_ATVAL_UINT . fromIntegral) <*> getWord16 dr
-getForm_ dr str cu DW_FORM_data4     = pure (DW_ATVAL_UINT . fromIntegral) <*> getWord32 dr
-getForm_ dr str cu DW_FORM_data8     = pure (DW_ATVAL_UINT . fromIntegral) <*> getWord64 dr
+getForm_ dr str cu DW_FORM_data2     = pure (DW_ATVAL_UINT . fromIntegral) <*> (getWord16 dr)
+getForm_ dr str cu DW_FORM_data4     = pure (DW_ATVAL_UINT . fromIntegral) <*> (getWord32 dr)
+getForm_ dr str cu DW_FORM_data8     = pure (DW_ATVAL_UINT . fromIntegral) <*> (getWord64 dr)
 getForm_ dr str cu DW_FORM_udata     = pure DW_ATVAL_UINT <*> getULEB128
 getForm_ dr str cu DW_FORM_sdata     = pure DW_ATVAL_INT <*> getSLEB128
 getForm_ dr str cu DW_FORM_flag      = pure (DW_ATVAL_BOOL . (/= 0)) <*> getWord8
@@ -216,14 +216,19 @@ data DW_ABBREV = DW_ABBREV
     }
 
 getAbbrevList :: Get [(Word64, DW_ABBREV)]
-getAbbrevList = getWhile ((/=) 0 . fst) getAbbrev
-    where getAbbrev = do
-            abbrev    <- getULEB128
-            tag       <- getDW_TAG
-            children  <- liftM (== 1) getWord8
-            attrForms <- getAttrFormList
-            return (abbrev, DW_ABBREV abbrev tag children attrForms)
-          getAttrFormList = liftM (map (dw_at *** dw_form)) $ getWhile (/= (0,0)) (liftM2 (,) getULEB128 getULEB128)
+getAbbrevList =
+  do abbrev <- getULEB128
+     if abbrev == 0
+       then return []
+       else do tag       <- getDW_TAG
+               children  <- liftM (== 1) getWord8
+               attrForms <- getAttrFormList
+               xs <- getAbbrevList
+               return  ((abbrev, DW_ABBREV abbrev tag children attrForms) : xs)
+  where
+  getAttrFormList = liftM (map (\(x,y) -> (dw_at x, dw_form y)))
+                  $ getWhile (/= (0,0)) (liftM2 (,) getULEB128 getULEB128)
+
 
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 -- DWARF information entry and .debug_info section parsing.
@@ -260,7 +265,7 @@ getDieTree parent lsibling abbrev_map dr str_section cu_offset = do
         values    <- mapM (getForm dr str_section cu_offset) forms
         ancestors <- if has_children then getDieTree (Just offset) Nothing abbrev_map dr str_section cu_offset else return []
         siblings  <- getDieTree parent (Just offset) abbrev_map dr str_section cu_offset
-        let children = map dieId $ filter (\x -> isJust (dieParent x) && fromJust (dieParent x) == offset) ancestors
+        let children = map dieId $ filter (\x -> if isJust (dieParent x) then fromJust (dieParent x) == offset else False) ancestors
             rsibling = if null siblings then Nothing else Just $ dieId $ head siblings
         return $ (DIE offset parent children lsibling rsibling tag (zip attrs values) dr : ancestors) ++ siblings
 
@@ -289,7 +294,7 @@ getDieCus cu_lsibling odr abbrev_section str_section = do
         cu_values    <- mapM (getForm dr str_section cu_offset) cu_forms
         cu_ancestors <- if cu_has_children then getDieTree (Just cu_offset) Nothing abbrev_map dr str_section cu_offset else return []
         cu_siblings  <- getDieCus Nothing odr abbrev_section str_section
-        let cu_children = map dieId $ filter (\x -> isJust (dieParent x) && fromJust (dieParent x) == cu_offset) cu_ancestors
+        let cu_children = map dieId $ filter (\x -> if isJust (dieParent x) then fromJust (dieParent x) == cu_offset else False) cu_ancestors
             cu_rsibling = if null cu_siblings then Nothing else Just $ dieId $ head cu_siblings
         return $ (DIE cu_die_offset Nothing cu_children cu_lsibling cu_rsibling cu_tag (zip cu_attrs cu_values) dr : cu_ancestors) ++ cu_siblings
 
@@ -412,7 +417,7 @@ getDW_LNI dr line_base line_range opcode_base minimum_instruction_length = liftM
           getDW_LNI_ 0x0b = return DW_LNS_set_epilogue_begin
           getDW_LNI_ 0x0c = return DW_LNS_set_isa <*> getULEB128
           getDW_LNI_ n    = let addr_incr = minimum_instruction_length * ((n - opcode_base) `div` line_range)
-                                line_incr = fromIntegral line_base + ((fromIntegral n - fromIntegral opcode_base) `mod` fromIntegral line_range)
+                                line_incr = (fromIntegral line_base) + (((fromIntegral n) - (fromIntegral opcode_base)) `mod` (fromIntegral line_range))
                             in return $ DW_LNI_special addr_incr line_incr
 
 stepLineMachine :: Bool -> Word8 -> DW_LNE -> [DW_LNI] -> [DW_LNE]
@@ -466,7 +471,7 @@ stepLineMachine is_stmt mil lnm (DW_LNE_set_address address : xs) =
     let new = lnm { lnmAddress = address }
     in stepLineMachine is_stmt mil new xs
 stepLineMachine is_stmt mil lnm (DW_LNE_define_file name dir_index time length : xs) =
-    let new = lnm { lnmFiles = lnmFiles lnm ++ [(name, dir_index, time, length)] }
+    let new = lnm { lnmFiles = (lnmFiles lnm) ++ [(name, dir_index, time, length)] }
     in stepLineMachine is_stmt mil new xs
 
 data DW_LNE = DW_LNE
@@ -556,7 +561,7 @@ getDwarfMacInfo = do
         0x01 -> pure (:) <*> (pure DW_MACINFO_define     <*> getULEB128 <*> getNullTerminatedString) <*> getDwarfMacInfo
         0x02 -> pure (:) <*> (pure DW_MACINFO_undef      <*> getULEB128 <*> getNullTerminatedString) <*> getDwarfMacInfo
         0x03 -> pure (:) <*> (pure DW_MACINFO_start_file <*> getULEB128 <*> getULEB128)              <*> getDwarfMacInfo
-        0x04 -> pure (:) <*> pure DW_MACINFO_end_file                                              <*> getDwarfMacInfo
+        0x04 -> pure (:) <*> (pure DW_MACINFO_end_file)                                              <*> getDwarfMacInfo
         0xff -> pure (:) <*> (pure DW_MACINFO_vendor_ext <*> getULEB128 <*> getNullTerminatedString) <*> getDwarfMacInfo
 
 -- Section 7.22 - Call Frame
@@ -640,7 +645,7 @@ getWhileNotEmpty get = do
     empty <- isEmpty
     if empty then
         return []
-     else
+     else do
         liftM2 (:) get (getWhileNotEmpty get)
 
 getCIEFDE littleEndian target64 = do
@@ -655,7 +660,7 @@ getCIEFDE littleEndian target64 = do
         code_alignment_factor   <- getULEB128
         data_alignment_factor   <- getSLEB128
         return_address_register <- case version of
-                                    1 -> liftM fromIntegral getWord8
+                                    1 -> liftM fromIntegral $ getWord8
                                     3 -> getULEB128
                                     n -> fail $ "Unrecognized CIE version " ++ show n
         end                     <- bytesRead
@@ -1006,7 +1011,7 @@ dw_at 0x65 = DW_AT_endianity
 dw_at 0x66 = DW_AT_elemental
 dw_at 0x67 = DW_AT_pure
 dw_at 0x68 = DW_AT_recursive
-dw_at n | 0x2000 <= n && n <= 0x3fff = DW_AT_user n
+dw_at n | 0x2000 <= n && n <= 0x3fff = DW_AT_user n 
 dw_at n = error $ "Unrecognized DW_AT " ++ show n
 
 data DW_ATVAL
