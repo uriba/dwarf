@@ -1,6 +1,7 @@
 -- | Parses the DWARF 2 and DWARF 3 specifications at http://www.dwarfstd.org given
 -- the debug sections in ByteString form.
 module Data.Dwarf ( parseDwarfInfo
+                  , parseDwarfAranges
                   , parseDwarfPubnames
                   , parseDwarfPubtypes
                   , parseDwarfMacInfo
@@ -292,7 +293,7 @@ getDieCus cu_lsibling odr abbrev_section str_section = do
             cu_has_children      = abbrevChildren cu_abbrev
             (cu_attrs, cu_forms) = unzip $ abbrevAttrForms cu_abbrev
         cu_values    <- mapM (getForm dr str_section cu_offset) cu_forms
-        cu_ancestors <- if cu_has_children then getDieTree (Just cu_offset) Nothing abbrev_map dr str_section cu_offset else return []
+        cu_ancestors <- if cu_has_children then getDieTree (Just cu_die_offset) Nothing abbrev_map dr str_section cu_offset else return []
         cu_siblings  <- getDieCus Nothing odr abbrev_section str_section
         let cu_children = map dieId $ filter (\x -> if isJust (dieParent x) then fromJust (dieParent x) == cu_offset else False) cu_ancestors
             cu_rsibling = if null cu_siblings then Nothing else Just $ dieId $ head cu_siblings
@@ -411,14 +412,16 @@ getDW_LNI dr line_base line_range opcode_base minimum_instruction_length = liftM
           getDW_LNI_ 0x05 = return DW_LNS_set_column <*> getULEB128
           getDW_LNI_ 0x06 = return DW_LNS_negate_stmt
           getDW_LNI_ 0x07 = return DW_LNS_set_basic_block
-          getDW_LNI_ 0x08 = return $ DW_LNS_const_add_pc (minimum_instruction_length * ((255 - opcode_base) `div` line_range))
+          getDW_LNI_ 0x08 = return $ DW_LNS_const_add_pc (minimum_instruction_length * fromIntegral ((255 - opcode_base) `div` line_range))
           getDW_LNI_ 0x09 = return DW_LNS_fixed_advance_pc <*> liftM fromIntegral (getWord16 dr)
           getDW_LNI_ 0x0a = return DW_LNS_set_prologue_end
           getDW_LNI_ 0x0b = return DW_LNS_set_epilogue_begin
           getDW_LNI_ 0x0c = return DW_LNS_set_isa <*> getULEB128
-          getDW_LNI_ n    = let addr_incr = minimum_instruction_length * ((n - opcode_base) `div` line_range)
-                                line_incr = (fromIntegral line_base) + (((fromIntegral n) - (fromIntegral opcode_base)) `mod` (fromIntegral line_range))
-                            in return $ DW_LNI_special addr_incr line_incr
+          getDW_LNI_ n | n >= opcode_base =
+            let addr_incr = minimum_instruction_length * fromIntegral ((n - opcode_base) `div` line_range)
+                line_incr = line_base + fromIntegral ((n - opcode_base) `mod` line_range)
+             in return $ DW_LNI_special addr_incr line_incr
+          getDW_LNI_ n = fail $ "Unexpected DW_LNI opcode " ++ show n
 
 stepLineMachine :: Bool -> Word8 -> DW_LNE -> [DW_LNI] -> [DW_LNE]
 stepLineMachine _ _ _ [] = []
@@ -524,22 +527,32 @@ getDwarfLine target64 dr = do
             liftM (el :) $ getWhileInclusive cond get
          else
             return [el]
-    (dr, _)                    <- getDwarfUnitLength dr
+    (dr, sectLen)              <- getDwarfUnitLength dr
+    startLen <- bytesRead
     dr                         <- return $ dwarfReader target64 dr
     version                    <- getWord16 dr
     header_length              <- getDwarfOffset dr
     minimum_instruction_length <- getWord8
     default_is_stmt            <- liftM (/= 0) getWord8
-    line_base                  <- liftM fromIntegral getWord8 :: Get Int8
+    line_base                  <- get :: Get Int8
     line_range                 <- getWord8
     opcode_base                <- getWord8
-    standard_opcode_lengths    <- liftM B.unpack $ getByteString $ fromIntegral (opcode_base - 2)
+    standard_opcode_lengths    <- replicateM (fromIntegral opcode_base - 2) getWord8
     include_directories        <- getWhile (/= "") getNullTerminatedString
     file_names                 <- getDebugLineFileNames
-    line_program               <- getWhileInclusive (/= DW_LNE_end_sequence) (getDW_LNI dr (fromIntegral line_base) (fromIntegral line_range) (fromIntegral opcode_base) (fromIntegral minimum_instruction_length))
-    initial_state              <- return $ defaultLNE default_is_stmt file_names
-    line_matrix                <- return $ stepLineMachine default_is_stmt minimum_instruction_length initial_state line_program
-    return (map (\(name, _, _, _) -> name) file_names, line_matrix)
+    endLen <- bytesRead
+    -- Check if we have reached the end of the section.
+    if fromIntegral sectLen <= endLen - startLen
+      then return (map (\(name, _, _, _) -> name) file_names, [])
+      else do
+        line_program <- getWhileInclusive (/= DW_LNE_end_sequence) $
+                           getDW_LNI dr (fromIntegral line_base)
+                                        line_range
+                                        opcode_base
+                                        (fromIntegral minimum_instruction_length)
+        let initial_state = defaultLNE default_is_stmt file_names
+            line_matrix = stepLineMachine default_is_stmt minimum_instruction_length initial_state line_program
+         in return (map (\(name, _, _, _) -> name) file_names, line_matrix)
 
 -- Section 7.21 - Macro Information
 data DW_MACINFO
