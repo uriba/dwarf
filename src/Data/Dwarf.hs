@@ -1,6 +1,7 @@
 -- | Parses the DWARF 2 and DWARF 3 specifications at http://www.dwarfstd.org given
 -- the debug sections in ByteString form.
 module Data.Dwarf ( parseDwarfInfo
+                  , infoCompileUnit
                   , parseDwarfAranges
                   , parseDwarfPubnames
                   , parseDwarfPubtypes
@@ -295,9 +296,19 @@ getDieCus cu_lsibling odr abbrev_section str_section = do
         cu_values    <- mapM (getForm dr str_section cu_offset) cu_forms
         cu_ancestors <- if cu_has_children then getDieTree (Just cu_die_offset) Nothing abbrev_map dr str_section cu_offset else return []
         cu_siblings  <- getDieCus Nothing odr abbrev_section str_section
-        let cu_children = map dieId $ filter (\x -> if isJust (dieParent x) then fromJust (dieParent x) == cu_offset else False) cu_ancestors
+        let cu_children = map dieId $ filter (maybe False (== cu_die_offset) . dieParent) cu_ancestors
             cu_rsibling = if null cu_siblings then Nothing else Just $ dieId $ head cu_siblings
         return $ (DIE cu_die_offset Nothing cu_children cu_lsibling cu_rsibling cu_tag (zip cu_attrs cu_values) dr : cu_ancestors) ++ cu_siblings
+
+-- | Returns compilation unit id given the header offset into .debug_info
+infoCompileUnit  :: B.ByteString -- ^ Contents of .debug_info
+                 -> Word64 -- ^ Offset into .debug_info header
+                 -> Word64 -- ^ Offset of compile unit DIE.
+infoCompileUnit infoSection offset = do
+  case runGet getWord32be
+        (L.fromChunks [B.drop (fromIntegral offset) infoSection]) of
+    0xffffffff -> offset + 23
+    _ -> offset + 11
 
 -- | Parses the .debug_info section (as ByteString) using the .debug_abbrev and .debug_str sections.
 parseDwarfInfo :: Bool             -- ^ True for little endian target addresses. False for big endian.
