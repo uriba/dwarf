@@ -548,7 +548,7 @@ getDwarfLine target64 dr = do
     line_base                  <- get :: Get Int8
     line_range                 <- getWord8
     opcode_base                <- getWord8
-    standard_opcode_lengths    <- replicateM (fromIntegral opcode_base - 2) getWord8
+    standard_opcode_lengths    <- replicateM (fromIntegral opcode_base - 1) getWord8
     include_directories        <- getWhile (/= "") getNullTerminatedString
     file_names                 <- getDebugLineFileNames
     endLen <- bytesRead
