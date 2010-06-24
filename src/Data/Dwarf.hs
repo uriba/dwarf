@@ -1,6 +1,10 @@
 -- | Parses the DWARF 2 and DWARF 3 specifications at http://www.dwarfstd.org given
 -- the debug sections in ByteString form.
 module Data.Dwarf ( parseDwarfInfo
+                  , getCUDies
+                  , getDieChildren
+                  , BasicDIE (..)
+                  , parseDwarfInfoList
                   , infoCompileUnit
                   , parseDwarfAranges
                   , parseDwarfPubnames
@@ -45,6 +49,8 @@ module Data.Dwarf ( parseDwarfInfo
                   , DW_CC(..)
                   , DW_ORD(..)
                   , DW_DSC(..)
+                  , DW_ABBREV(..)
+                  , getAbbrevList
                   ) where
 
 import Data.Int
@@ -53,11 +59,15 @@ import Data.Word
 import Data.Dynamic
 import Data.Binary
 import Data.Binary.Get
+import Data.Binary.Put
 import Data.Maybe
 import Data.Char
 import Control.Monad
 import Control.Applicative
+import qualified Data.List as LI 
 import qualified Data.Map as M
+import qualified Data.EnumMap as EM
+import qualified Data.Array as A
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
 import qualified Data.ByteString.Lazy as L
@@ -215,9 +225,9 @@ data DW_ABBREV = DW_ABBREV
     , abbrevTag       :: DW_TAG
     , abbrevChildren  :: Bool
     , abbrevAttrForms :: [(DW_AT, DW_FORM)]
-    }
+    } deriving (Show)
 
-getAbbrevList :: Get [(Word64, DW_ABBREV)]
+getAbbrevList :: Get [(Int, DW_ABBREV)]
 getAbbrevList =
   do abbrev <- getULEB128
      if abbrev == 0
@@ -226,7 +236,7 @@ getAbbrevList =
                children  <- liftM (== 1) getWord8
                attrForms <- getAttrFormList
                xs <- getAbbrevList
-               return  ((abbrev, DW_ABBREV abbrev tag children attrForms) : xs)
+               return  ((fromIntegral abbrev, DW_ABBREV abbrev tag children attrForms) : xs)
   where
   getAttrFormList = liftM (map (\(x,y) -> (dw_at x, dw_form y)))
                   $ getWhile (/= (0,0)) (liftM2 (,) getULEB128 getULEB128)
@@ -260,7 +270,7 @@ getDieTree parent lsibling abbrev_map dr str_section cu_offset = do
     if abbrid == 0 then
         return []
      else do
-        let abbrev         = abbrev_map M.! abbrid
+        let abbrev         = abbrev_map A.! (fromIntegral abbrid)
             tag            = abbrevTag abbrev
             has_children   = abbrevChildren abbrev
             (attrs, forms) = unzip $ abbrevAttrForms abbrev
@@ -270,6 +280,131 @@ getDieTree parent lsibling abbrev_map dr str_section cu_offset = do
         let children = map dieId $ filter (\x -> if isJust (dieParent x) then fromJust (dieParent x) == offset else False) ancestors
             rsibling = if null siblings then Nothing else Just $ dieId $ head siblings
         return $ (DIE offset parent children lsibling rsibling tag (zip attrs values) dr : ancestors) ++ siblings
+
+--------UB------
+defaultReader :: DwarfReader
+defaultReader = dwarfReader True $ dwarfEndianSizeReader False $ dwarfEndianReader True
+
+data BasicDIE = BasicDIE
+    { basicDieId            :: Word64   -- ^ Unique identifier for this entry.
+    , basicDieHasChildren   :: Bool     -- ^ Unique identifiers of this entry's children.
+    , basicDieSize          :: Word64   -- ^ the size of this DIE, which is needed in order to know where the next DIE entry starts from
+    , basicDieTag           :: DW_TAG   -- ^ Type tag.
+    , basicDieAttributes    :: [(DW_AT, DW_ATVAL)] -- ^ Attribute tag and value pairs.
+    , basicDieContext       :: DIEReadContext      -- ^ Context needed to parse childern/siblings
+    } deriving (Show)
+
+data DIEReadContext = DIEReadContext { cuOffset :: Word64, drcStringTable :: B.ByteString, drcDebugInfo :: B.ByteString, abbrevTable :: A.Array Int DW_ABBREV } 
+
+instance Show DIEReadContext where
+    show drc = "DIEReadContext " ++ show (cuOffset drc)
+
+dieReadContext :: (Int, CompilationUnit) -> DebugInfo -> DIEReadContext
+dieReadContext cu@(cu_offset,_) di = DIEReadContext (fromIntegral cu_offset) (stringTable di) (debugInfo di) (abbrevList cu di)
+
+data CompilationUnit = CompilationUnit { cuLength :: Word32, dwarfVersion :: Word16, abbrevOffset :: Word32, addrSize :: Word8 } deriving (Show)
+
+data DebugInfo = DebugInfo { reader :: DwarfReader, debugInfo :: B.ByteString, abbrevSection :: B.ByteString, stringTable :: B.ByteString }
+
+instance Binary CompilationUnit where
+    put cu = do
+        putWord32le $ cuLength cu
+        putWord16le $ dwarfVersion cu
+        putWord32le $ abbrevOffset cu
+        put $ addrSize cu
+    get = do
+        len <- getWord32le
+        ver <- getWord16le
+        offset <- getWord32le
+        addrSize <- get
+        return (CompilationUnit {cuLength = len, dwarfVersion = ver, abbrevOffset = offset, addrSize = addrSize } )
+
+getCUHeaders :: Int -> B.ByteString -> [(Int,CompilationUnit)]
+getCUHeaders offset bs
+    | B.null remainingBs = []
+    | otherwise = (offset,cu) : (getCUHeaders (fromIntegral (offset + 4 + (fromIntegral $ cuLength cu)))  bs)
+        where
+            remainingBs = B.drop (fromIntegral offset) bs
+            cu = runGet get $ L.fromChunks [remainingBs]
+
+getDie :: DIEReadContext -> Word64 -> (Get (Maybe BasicDIE))
+getDie rc@(DIEReadContext cu_offset str_section _ abbrev_map) die_offset = do
+        abbr_num <- getULEB128 
+        if abbr_num == 0
+            then 
+                return Nothing
+            else do 
+                let 
+                    dr                = defaultReader -- TODO support all relevant architectures
+                    abbrev            = abbrev_map A.! (fromIntegral abbr_num)
+                    tag               = abbrevTag abbrev
+                    has_children      = abbrevChildren abbrev
+                    (attrs, forms) = unzip $ abbrevAttrForms abbrev
+                    lsibling = Nothing
+                values    <- mapM (getForm dr str_section cu_offset) forms
+                dieSize   <- bytesRead
+                return $ Just (BasicDIE die_offset has_children (fromIntegral dieSize) tag (zip attrs values) rc)
+
+abbrevList :: (Int, CompilationUnit) -> DebugInfo -> A.Array Int DW_ABBREV
+abbrevList (_,cu) (DebugInfo _ _ at _) = abbrev_map
+    where
+        abbrev_map         = A.array (1, length abbrevs) abbrevs
+        abbrevs            = runGet getAbbrevList $ L.fromChunks [abbrev_table]
+        abbrev_table       = B.drop (fromIntegral (abbrevOffset cu)) at
+
+getDieChild :: BasicDIE -> Maybe BasicDIE
+getDieChild die@(BasicDIE die_offset has_childern die_size _ _ rc)
+    | has_childern = runGet (getDie rc next_die_offset) $ L.fromChunks [B.drop (fromIntegral next_die_offset) (drcDebugInfo rc)]
+    | otherwise = Nothing
+        where
+            next_die_offset = die_offset + die_size
+
+getDieSibling :: BasicDIE -> Maybe BasicDIE
+getDieSibling die@(BasicDIE die_offset has_childern die_size _ _ rc)
+    | has_childern == False = getNextDie die
+    | die_direct_sibling /= Nothing = runGet (getDie rc (fromIntegral sibling_die_offset)) $ L.fromChunks [B.drop sibling_die_offset (drcDebugInfo rc)]
+    | otherwise = Nothing
+        where
+            sibling_die_offset         = fromIntegral $ fromJust die_direct_sibling 
+            die_direct_sibling         = directSibling die
+
+getDieSiblings :: BasicDIE -> [BasicDIE]
+getDieSiblings die
+    | isNothing maybe_sibling   = []
+    | otherwise                 = sibling : (getDieSiblings sibling)
+        where
+            maybe_sibling   = getDieSibling die
+            sibling         = fromJust maybe_sibling
+
+getDieChildren :: BasicDIE -> [BasicDIE]
+getDieChildren die
+    | isNothing maybe_child = []
+    | otherwise             = child : (getDieSiblings child)
+        where
+            maybe_child     = getDieChild die
+            child           = fromJust maybe_child
+
+directSibling :: BasicDIE -> Maybe Word64
+directSibling die = sibling $ LI.find (\x -> fst x == DW_AT_sibling) (basicDieAttributes die) 
+    where
+        sibling (Just (DW_AT_sibling, DW_ATVAL_UINT sib)) = Just sib
+        sibling Nothing = Nothing
+
+getNextDie :: BasicDIE -> Maybe BasicDIE
+getNextDie die = runGet (getDie rc (fromIntegral next_die_offset) ) $ L.fromChunks [B.drop next_die_offset (drcDebugInfo rc)]
+    where
+        next_die_offset     = fromIntegral (basicDieId die + (basicDieSize die))
+        rc                  = basicDieContext die
+
+getCUDie :: (Int,CompilationUnit) -> DebugInfo -> BasicDIE
+getCUDie cu@(offset,_) dbgnfo@(DebugInfo dr di at st) = fromJust $ runGet (getDie (dieReadContext cu dbgnfo) (fromIntegral cu_die_offset)) $ L.fromChunks [B.drop cu_die_offset di]
+    where
+        cu_die_offset      = offset + 11 -- TODO get rid of this ugly hack
+
+getCUDies :: B.ByteString -> B.ByteString -> B.ByteString -> [BasicDIE]
+getCUDies di at st = zipWith getCUDie cus $ repeat (DebugInfo defaultReader di at st)
+    where
+        cus = getCUHeaders 0 di
 
 -- Decode the compilation unit DWARF information entries.
 getDieCus cu_lsibling odr abbrev_section str_section = do
@@ -288,8 +423,10 @@ getDieCus cu_lsibling odr abbrev_section str_section = do
         cu_die_offset   <- liftM fromIntegral bytesRead
         cu_abbr_num     <- getULEB128
         let abbrev_table         = B.drop (fromIntegral abbrev_offset) abbrev_section
-            abbrev_map           = M.fromList $ runGet getAbbrevList $ L.fromChunks [abbrev_table]
-            cu_abbrev            = abbrev_map M.! cu_abbr_num
+            abbrev_map           = A.array (1, length abbrevs) abbrevs
+                where
+                    abbrevs = runGet getAbbrevList $ L.fromChunks [abbrev_table]
+            cu_abbrev            = abbrev_map A.! (fromIntegral cu_abbr_num)
             cu_tag               = abbrevTag cu_abbrev
             cu_has_children      = abbrevChildren cu_abbrev
             (cu_attrs, cu_forms) = unzip $ abbrevAttrForms cu_abbrev
@@ -310,16 +447,24 @@ infoCompileUnit infoSection offset = do
     0xffffffff -> offset + 23
     _ -> offset + 11
 
+parseDwarfInfoList :: Bool             -- ^ True for little endian target addresses. False for big endian.
+               -> B.ByteString     -- ^ ByteString for the .debug_info section.
+               -> B.ByteString     -- ^ ByteString for the .debug_abbrev section.
+               -> B.ByteString     -- ^ ByteString for the .debug_str section.
+               -> [DIE] -- ^ DIE list
+parseDwarfInfoList littleEndian info_section abbrev_section str_section =
+    let dr = dwarfEndianReader littleEndian
+    in runGet (getDieCus Nothing dr abbrev_section str_section) $ L.fromChunks [info_section]
+
 -- | Parses the .debug_info section (as ByteString) using the .debug_abbrev and .debug_str sections.
 parseDwarfInfo :: Bool             -- ^ True for little endian target addresses. False for big endian.
                -> B.ByteString     -- ^ ByteString for the .debug_info section.
                -> B.ByteString     -- ^ ByteString for the .debug_abbrev section.
                -> B.ByteString     -- ^ ByteString for the .debug_str section.
-               -> M.Map Word64 DIE -- ^ A map from the unique ids to their corresponding DWARF information entries.
+               -> EM.EnumMap Word64 DIE -- ^ A map from the unique ids to their corresponding DWARF information entries.
 parseDwarfInfo littleEndian info_section abbrev_section str_section =
-    let dr = dwarfEndianReader littleEndian
-        di = runGet (getDieCus Nothing dr abbrev_section str_section) $ L.fromChunks [info_section]
-    in M.fromList $ zip (map dieId di) di
+    let di = parseDwarfInfoList littleEndian info_section abbrev_section str_section
+    in EM.fromList $ zip (map dieId di) di
 
 -- Section 7.19 - Name Lookup Tables
 getNameLookupEntries :: DwarfReader -> Word64 -> Get [(String, [Word64])]
