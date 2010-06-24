@@ -27,6 +27,7 @@ module Data.Dwarf ( parseDwarfInfo
                   , dw_ord
                   , dw_dsc
                   , (!?)
+                  , (!!?)
                   , DwarfReader(..)
                   , DIE(..)
                   , DW_CFA(..)
@@ -294,6 +295,8 @@ data BasicDIE = BasicDIE
     , basicDieContext       :: DIEReadContext      -- ^ Context needed to parse childern/siblings
     } deriving (Show)
 
+(!!?) :: BasicDIE -> DW_AT -> [DW_ATVAL]
+(!!?) die at = map snd $ filter (\(a,v) -> a == at) $ basicDieAttributes die
 data DIEReadContext = DIEReadContext { cuOffset :: Word64, drcStringTable :: B.ByteString, drcDebugInfo :: B.ByteString, abbrevTable :: A.Array Int DW_ABBREV } 
 
 instance Show DIEReadContext where
