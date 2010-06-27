@@ -37,6 +37,8 @@ module Data.Dwarf ( parseDwarfInfo
                   , DW_TAG(..)
                   , DW_AT(..)
                   , DW_ATVAL(..)
+                  , getATVALUint
+                  , getATVALString
                   , DW_LNE(..)
                   , DW_ATE(..)
                   , DW_DS(..)
@@ -295,8 +297,8 @@ data BasicDIE = BasicDIE
     , basicDieContext       :: DIEReadContext      -- ^ Context needed to parse childern/siblings
     } deriving (Show)
 
-(!!?) :: BasicDIE -> DW_AT -> [DW_ATVAL]
-(!!?) die at = map snd $ filter (\(a,v) -> a == at) $ basicDieAttributes die
+(!!?) :: BasicDIE -> DW_AT -> Maybe DW_ATVAL
+(!!?) die at = fmap snd . LI.find (\(a,v) -> a == at) $ basicDieAttributes die
 data DIEReadContext = DIEReadContext { cuOffset :: Word64, drcStringTable :: B.ByteString, drcDebugInfo :: B.ByteString, abbrevTable :: A.Array Int DW_ABBREV } 
 
 instance Show DIEReadContext where
@@ -1193,6 +1195,14 @@ data DW_ATVAL
     | DW_ATVAL_BLOB   B.ByteString
     | DW_ATVAL_BOOL   Bool
     deriving (Show, Eq)
+
+getATVALString :: DW_ATVAL -> Maybe String
+getATVALString (DW_ATVAL_STRING str) = Just str
+getATVALString _ = Nothing
+
+getATVALUint :: DW_ATVAL -> Maybe Word64
+getATVALUint (DW_ATVAL_UINT uint) = Just uint
+getATVALUint _ = Nothing
 
 data DW_FORM
     = DW_FORM_addr              -- ^ address
