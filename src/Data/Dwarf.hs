@@ -3,6 +3,7 @@
 module Data.Dwarf ( parseDwarfInfo
                   , getCUDies
                   , getDieChildren
+                  , defaultReader
                   , BasicDIE (..)
                   , parseDwarfInfoList
                   , infoCompileUnit
@@ -38,7 +39,10 @@ module Data.Dwarf ( parseDwarfInfo
                   , DW_AT(..)
                   , DW_ATVAL(..)
                   , getATVALUint
+                  , getATVALInt
+                  , getATVALBlob
                   , getATVALString
+                  , getDW_OP_plus_uconst
                   , DW_LNE(..)
                   , DW_ATE(..)
                   , DW_DS(..)
@@ -1196,6 +1200,10 @@ data DW_ATVAL
     | DW_ATVAL_BOOL   Bool
     deriving (Show, Eq)
 
+getATVALBlob :: DW_ATVAL -> Maybe B.ByteString
+getATVALBlob (DW_ATVAL_BLOB b) = Just b 
+getATVALBlob _ = Nothing
+
 getATVALString :: DW_ATVAL -> Maybe String
 getATVALString (DW_ATVAL_STRING str) = Just str
 getATVALString _ = Nothing
@@ -1203,6 +1211,14 @@ getATVALString _ = Nothing
 getATVALUint :: DW_ATVAL -> Maybe Word64
 getATVALUint (DW_ATVAL_UINT uint) = Just uint
 getATVALUint _ = Nothing
+
+getATVALInt :: DW_ATVAL -> Maybe Int64
+getATVALInt (DW_ATVAL_INT int) = Just int
+getATVALInt _ = Nothing
+
+getDW_OP_plus_uconst :: DW_OP -> Maybe Word64
+getDW_OP_plus_uconst (DW_OP_plus_uconst uint) = Just uint
+getDW_OP_plus_uconst _ = Nothing
 
 data DW_FORM
     = DW_FORM_addr              -- ^ address
