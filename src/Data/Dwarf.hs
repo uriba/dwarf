@@ -125,21 +125,25 @@ getNullTerminatedString = liftM (map (chr . fromIntegral)) $ getWhile (/= 0) get
                 n | n .&. 0xf0 == 0xe0 -> getCharUTF83 n
                 n | n .&. 0xf8 == 0xf0 -> getCharUTF84 n
                 _                      -> fail "Invalid first byte in UTF8 string."
- 
+
+
 -- Decode a signed little-endian base 128 encoded integer.
 getSLEB128 :: Get Int64
-getSLEB128 =
-    let go acc shift = do
-        byte <- liftM fromIntegral getWord8 :: Get Word64
-        temp <- return $ acc .|. (clearBit byte 7 `shiftL` shift)
-        if testBit byte 7 then
-            go temp (shift + 7)
-         else
-            if shift < 32  && testBit byte 6 then
-                return $ fromIntegral $ temp .|. ((-1) `shiftL` shift)
-             else
-                return $ fromIntegral temp
-    in go 0 0
+getSLEB128 = go 0 0
+  where
+    go acc shift = do
+      byte <- liftM fromIntegral getWord8 :: Get Word64
+      temp <- return $ acc .|. (clearBit byte 7 `shiftL` shift)
+      if testBit byte 7 then
+        go temp shift'
+       else
+        return . fromIntegral $
+          if shift' < 32  && testBit byte 6 then
+            temp .|. ((-1) `shiftL` shift')
+          else
+            temp
+      where
+        shift' = shift + 7
 
 -- Decode an unsigned little-endian base 128 encoded integer.
 getULEB128 :: Get Word64
@@ -1200,21 +1204,21 @@ data DW_ATVAL
     | DW_ATVAL_BOOL   Bool
     deriving (Show, Eq)
 
-getATVALBlob :: DW_ATVAL -> Maybe B.ByteString
-getATVALBlob (DW_ATVAL_BLOB b) = Just b 
-getATVALBlob _ = Nothing
+getATVALBlob :: DW_ATVAL -> B.ByteString
+getATVALBlob (DW_ATVAL_BLOB b) = b
+getATVALBlob x = error $ show x ++ " is not of DW_ATVAL_BLOB type"
 
-getATVALString :: DW_ATVAL -> Maybe String
-getATVALString (DW_ATVAL_STRING str) = Just str
-getATVALString _ = Nothing
+getATVALString :: DW_ATVAL -> String
+getATVALString (DW_ATVAL_STRING str) = str
+getATVALString x = error $ show x ++ " is not of DW_ATVAL_STRING type"
 
-getATVALUint :: DW_ATVAL -> Maybe Word64
-getATVALUint (DW_ATVAL_UINT uint) = Just uint
-getATVALUint _ = Nothing
+getATVALUint :: DW_ATVAL -> Word64
+getATVALUint (DW_ATVAL_UINT uint) = uint
+getATVALUInt x = error $ show x ++ " is not of DW_ATVAL_UINT type"
 
-getATVALInt :: DW_ATVAL -> Maybe Int64
-getATVALInt (DW_ATVAL_INT int) = Just int
-getATVALInt _ = Nothing
+getATVALInt :: DW_ATVAL -> Int64
+getATVALInt (DW_ATVAL_INT int) = int
+getATVALInt x = error $ show x ++ " is not of DW_ATVAL_INT type"
 
 getDW_OP_plus_uconst :: DW_OP -> Maybe Word64
 getDW_OP_plus_uconst (DW_OP_plus_uconst uint) = Just uint
