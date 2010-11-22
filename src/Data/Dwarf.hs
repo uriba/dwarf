@@ -71,9 +71,9 @@ import Data.Maybe
 import Data.Char
 import Control.Monad
 import Control.Applicative
-import qualified Data.List as LI 
+import qualified Data.List as LI
 import qualified Data.Map as M
-import qualified Data.EnumMap as EM
+import qualified Data.EnumIntMap as EM
 import qualified Data.Array as A
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as C
@@ -474,7 +474,7 @@ parseDwarfInfo :: Bool             -- ^ True for little endian target addresses.
                -> B.ByteString     -- ^ ByteString for the .debug_info section.
                -> B.ByteString     -- ^ ByteString for the .debug_abbrev section.
                -> B.ByteString     -- ^ ByteString for the .debug_str section.
-               -> EM.EnumMap Word64 DIE -- ^ A map from the unique ids to their corresponding DWARF information entries.
+               -> EM.EnumIntMap Word64 DIE -- ^ A map from the unique ids to their corresponding DWARF information entries.
 parseDwarfInfo littleEndian info_section abbrev_section str_section =
     let di = parseDwarfInfoList littleEndian info_section abbrev_section str_section
     in EM.fromList $ zip (map dieId di) di
